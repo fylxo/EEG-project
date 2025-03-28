@@ -1,4 +1,20 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import mne
+from mne.datasets import eegbci
+from mne.io import read_raw_edf, concatenate_raws
+from mne.channels import make_standard_montage
+from scipy.signal import butter, filtfilt, hilbert
+from scipy.stats import linregress
+from mne.time_frequency import tfr_array_morlet
+import nolds
+from tqdm import tqdm
 
+
+# ----------------------------------------------------------------------------
+ 
+# load and perprocess factions
+# ----------------------------------------------------------------------------
 
 def load_and_preprocess_subject(subject, runs_dict, l_freq=1., h_freq=40.):   # bandpass: (7.0, 30.0)
     """
@@ -44,14 +60,11 @@ def load_and_preprocess_subject(subject, runs_dict, l_freq=1., h_freq=40.):   # 
 
     return subject_data
 
-
-
 def quick_plot(raw, title="Raw EEG Debug"):
     """
     Quick plot for sanity check.
     """
     raw.plot(n_channels=8, scalings="auto", title=title, show=True)
-
 
 
 def extract_clean_epochs(raw, tmin=0.0, tmax=4.0, reject_boundary_epochs=True):
@@ -91,8 +104,7 @@ def extract_clean_epochs(raw, tmin=0.0, tmax=4.0, reject_boundary_epochs=True):
 
     return {"rest": epochs_rest, "task": epochs_task}
 
-
-def compute_dfa_from_epochs(epochs, picks=None, dfa_window_sizes=np.logspace(4, 8, num=20, base=2, dtype=int)):
+def compute_dfa_from_epochs(epochs, picks=None, dfa_window_sizes=None):
     """
     Compute DFA alpha values from MNE Epochs object.
     
@@ -104,24 +116,26 @@ def compute_dfa_from_epochs(epochs, picks=None, dfa_window_sizes=np.logspace(4, 
         Channel names or indices to include. If None, uses all.
     dfa_window_sizes : array
         Array of window sizes (in samples) to use for DFA.
+        If None, will auto-generate logarithmically spaced sizes.
     
     Returns:
     --------
     alpha_vals : dict
         Dictionary with channel name as key and DFA alpha as value.
     """
-
+    import numpy as np
+    from scipy.stats import linregress
+    
     data = epochs.get_data(picks=picks)  # shape: (n_epochs, n_channels, n_times)
-    ch_names = epochs.info['ch_names'] if picks is None else picks
+    ch_names = epochs.ch_names if picks is None else picks
     alpha_vals = {}
 
     for i, ch in enumerate(ch_names):
         signal = data[:, i, :].reshape(-1)  # Concatenate all epochs for that channel
-        alpha = nolds.dfa(signal, fit_trend="poly", nvals=dfa_window_sizes)
+        alpha = compute_dfa(signal, nvals=dfa_window_sizes)
         alpha_vals[ch] = alpha
 
     return alpha_vals
-
 
 def compute_dfa(signal, nvals=None, order=1, debug_plot=True):
     """
