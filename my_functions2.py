@@ -1,3 +1,7 @@
+"""
+Functions for EEG preprocessing, analysis, and fractal features extraction.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import mne
@@ -6,17 +10,13 @@ from mne.io import read_raw_edf, concatenate_raws
 from mne.channels import make_standard_montage
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.stats import linregress
-from mne.time_frequency import tfr_array_morlet
-import nolds
 from tqdm import tqdm
 
+# -----------------------------------------------------------------------------
+# Data Loading and Preprocessing
+# -----------------------------------------------------------------------------
 
-# ----------------------------------------------------------------------------
- 
-# load and perprocess factions
-# ----------------------------------------------------------------------------
-
-def load_and_preprocess_subject(subject, runs_dict, l_freq=1., h_freq=40.):   # bandpass: (7.0, 30.0)
+def load_and_preprocess_subject(subject, runs_dict, l_freq=1., h_freq=40.):
     """
     Load & preprocess EEGBCI data for a subject split into conditions.
 
@@ -34,9 +34,8 @@ def load_and_preprocess_subject(subject, runs_dict, l_freq=1., h_freq=40.):   # 
     Returns:
     --------
     subject_data : dict
-        Dict with keys 'rest', 'motor_execution', 'motor_imagery', each containing a raw object
+        Dict with keys matching runs_dict, each containing a raw object
     """
-    
     subject_data = {}
 
     for condition, run_list in runs_dict.items():
@@ -60,15 +59,25 @@ def load_and_preprocess_subject(subject, runs_dict, l_freq=1., h_freq=40.):   # 
 
     return subject_data
 
-def quick_plot(raw, title="Raw EEG Debug"):
-    """
-    Quick plot for sanity check.
-    """
-    raw.plot(n_channels=8, scalings="auto", title=title, show=True)
-
 
 def extract_clean_epochs(raw, tmin=0.0, tmax=4.0, reject_boundary_epochs=True):
+    """
+    Extract clean epochs from a raw object, separating rest and task events.
     
+    Parameters:
+    -----------
+    raw : mne.io.Raw
+        Raw EEG data with events/annotations
+    tmin, tmax : float
+        Epoch time window around events
+    reject_boundary_epochs : bool
+        Whether to reject epochs that overlap with boundary annotations
+        
+    Returns:
+    --------
+    epochs_dict : dict
+        Dictionary with 'rest' and 'task' keys containing respective epochs
+    """
     events, event_id = mne.events_from_annotations(raw)
     print(f"\n⏺️ Used Annotations descriptions: {list(event_id.keys())}")
 
@@ -104,214 +113,76 @@ def extract_clean_epochs(raw, tmin=0.0, tmax=4.0, reject_boundary_epochs=True):
 
     return {"rest": epochs_rest, "task": epochs_task}
 
-def compute_dfa_from_epochs(epochs, picks=None, dfa_window_sizes=None):
+
+def quick_plot(raw, title="Raw EEG Debug", n_channels=8):
     """
-    Compute DFA alpha values from MNE Epochs object.
+    Quick plot for sanity check.
     
     Parameters:
     -----------
-    epochs : mne.Epochs
-        MNE Epochs object to extract data from.
-    picks : list or None
-        Channel names or indices to include. If None, uses all.
-    dfa_window_sizes : array
-        Array of window sizes (in samples) to use for DFA.
-        If None, will auto-generate logarithmically spaced sizes.
-    
-    Returns:
-    --------
-    alpha_vals : dict
-        Dictionary with channel name as key and DFA alpha as value.
+    raw : mne.io.Raw
+        Raw EEG data
+    title : str
+        Plot title
+    n_channels : int
+        Number of channels to display
     """
-    import numpy as np
-    from scipy.stats import linregress
-    
-    data = epochs.get_data(picks=picks)  # shape: (n_epochs, n_channels, n_times)
-    ch_names = epochs.ch_names if picks is None else picks
-    alpha_vals = {}
+    raw.plot(n_channels=n_channels, scalings="auto", title=title, show=True)
 
-    for i, ch in enumerate(ch_names):
-        signal = data[:, i, :].reshape(-1)  # Concatenate all epochs for that channel
-        alpha = compute_dfa(signal, nvals=dfa_window_sizes)
-        alpha_vals[ch] = alpha
 
-    return alpha_vals
+# -----------------------------------------------------------------------------
+# Signal Processing Functions
+# -----------------------------------------------------------------------------
 
-def compute_dfa(signal, nvals=None, order=1, debug_plot=True):
+def filter_signal(signal, sfreq, band, order=4):
     """
-    Perform Detrended Fluctuation Analysis (DFA) on a 1D signal.
-
+    Apply bandpass filter to signal.
+    
     Parameters:
     -----------
-    signal : np.ndarray
-        1D array of EEG signal.
-    nvals : list or array
-        List of window sizes to test. If None, it will be auto-generated.
+    signal : ndarray
+        Input signal
+    sfreq : float
+        Sampling frequency (Hz)
+    band : tuple
+        (low_freq, high_freq) in Hz
     order : int
-        Order of the polynomial fit in each window (default: 1 → linear).
-    debug_plot : bool
-        Whether to plot the log-log curve and fitted line.
-
+        Filter order
+        
     Returns:
     --------
-    alpha : float
-        Estimated DFA exponent.
+    filtered : ndarray
+        Bandpass filtered signal
     """
-    signal = np.array(signal)
-    N = len(signal)
-
-    # Step 1: Integrate the signal
-    x = signal - np.mean(signal)
-    y = np.cumsum(x)
-
-    # Step 2: Define window sizes
-    if nvals is None:
-        nvals = np.unique(np.logspace(np.log10(10), np.log10(N // 4), num=20, dtype=int))
-    
-    fluctuations = []
-
-    for n in nvals:
-        if n >= N:
-            continue
-
-        num_segments = N // n
-        local_flucts = []
-
-        for i in range(num_segments):
-            start = i * n
-            end = start + n
-            segment = y[start:end]
-
-            # Fit polynomial and subtract
-            t = np.arange(n)
-            coeffs = np.polyfit(t, segment, order)
-            fit = np.polyval(coeffs, t)
-            detrended = segment - fit
-
-            # RMS fluctuation
-            local_flucts.append(np.sqrt(np.mean(detrended**2)))
-
-        # Average over segments
-        F_n = np.sqrt(np.mean(np.array(local_flucts) ** 2))
-        fluctuations.append(F_n)
-
-    # Step 3: Fit log-log curve
-    log_n = np.log10(nvals[:len(fluctuations)])
-    log_F = np.log10(fluctuations)
-    slope, intercept, r, p, stderr = linregress(log_n, log_F)
-
-    if debug_plot:
-        plt.figure(figsize=(8, 5))
-        plt.plot(log_n, log_F, 'o-', label=f"DFA α = {slope:.3f}")
-        plt.xlabel("log10(window size)")
-        plt.ylabel("log10(RMS fluctuation)")
-        plt.title("Detrended Fluctuation Analysis (DFA)")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-
-    return slope
-
-def compute_Fn(segment, n):
-    """
-    Compute the fluctuation function for a given window size n.
-    """
-    Xn = np.lib.stride_tricks.sliding_window_view(segment, window_shape=n)
-    n_segments = Xn.shape[0]
-    Fn_array = np.zeros(n_segments)
-
-    t = np.arange(n)
-    for i, seg in enumerate(Xn):
-        trend = np.polyval(np.polyfit(t, seg, 1), t)
-        detrended = seg - trend
-        Fn_array[i] = np.std(detrended)
-
-    return np.mean(Fn_array)
-
-
-def compute_F(X, segment_sizes):
-    """
-    Computes the fluctuation function F(n) for each segment size in segment_sizes.
-    X shape: (n_channels, n_times)
-    """
-    n_channels = X.shape[0]
-    F = np.zeros((n_channels, len(segment_sizes)))
-
-    # Integrate signal (DFA Step 1)
-    X_int = np.cumsum(X - X.mean(axis=1, keepdims=True), axis=1)
-
-    for ch in tqdm(range(n_channels), desc="Computing F(n) per channel"):
-        for i, n in enumerate(segment_sizes):
-            F[ch, i] = compute_Fn(X_int[ch], n)
-
-    return F.mean(axis=0)  # Average across channels
-
-
-def compute_DFA(segment_sizes, F, fitting_range):
-    """
-    Fit a linear regression in log-log space to estimate the DFA alpha.
-    """
-    idx_fit = (segment_sizes > fitting_range[0]) & (segment_sizes < fitting_range[1])
-    log_n = np.log(segment_sizes[idx_fit])
-    log_F = np.log(F[idx_fit])
-
-    alpha, intercept = np.polyfit(log_n, log_F, 1)
-    return alpha, intercept, log_n, log_F
-
-
-def plot_dfa_fit(segment_sizes, F, alpha, intercept, fitting_range, freq=10, sfreq=160):
-    """
-    Visualize DFA result with log-log plot and fit.
-    """
-    N_cycles = (segment_sizes * freq) / sfreq
-    idx_size = (segment_sizes > fitting_range[0]) & (segment_sizes < fitting_range[1])
-    N_cycles_fit = N_cycles[idx_size]
-    F_fit = np.exp(intercept) * segment_sizes[idx_size] ** alpha
-
-    plt.figure(figsize=(8, 5))
-    plt.loglog(N_cycles, F, 'o-', label="F(n)", markersize=5)
-    plt.loglog(N_cycles_fit, F_fit, '--', label=f"Fit (α = {alpha:.3f})", linewidth=2)
-
-    plt.axvline((fitting_range[0] * freq) / sfreq, color="gray", linestyle="--")
-    plt.axvline((fitting_range[1] * freq) / sfreq, color="gray", linestyle="--", label="Fit Range")
-
-    plt.xlabel("Number of Cycles")
-    plt.ylabel("Fluctuation Function F(n)")
-    plt.title("DFA Log-Log Scaling")
-    plt.legend()
-    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.tight_layout()
-    plt.show()
+    nyquist = sfreq / 2.0
+    low, high = band[0] / nyquist, band[1] / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, signal)
 
 
 def extract_amplitude_envelope(signal, sfreq, band=(13, 30), filter_order=4):
     """
     Bandpass filters the signal and extracts the amplitude envelope using the Hilbert transform.
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     signal : 1D numpy array
-        EEG time series (1 channel).
+        EEG time series (1 channel)
     sfreq : float
-        Sampling frequency.
+        Sampling frequency
     band : tuple
-        Frequency range for bandpass filter (e.g., (13, 30) for beta).
+        Frequency range for bandpass filter (e.g., (13, 30) for beta)
     filter_order : int
-        Order of the Butterworth filter.
+        Order of the Butterworth filter
 
-    Returns
-    -------
+    Returns:
+    --------
     envelope : 1D numpy array
-        Amplitude envelope of the band-limited signal.
+        Amplitude envelope of the band-limited signal
     """
-    nyquist = sfreq / 2
-    low, high = band[0] / nyquist, band[1] / nyquist
-
     # Bandpass filter
-    b, a = butter(filter_order, [low, high], btype='band')
-    filtered = filtfilt(b, a, signal)
-
+    filtered = filter_signal(signal, sfreq, band, order=filter_order)
+    
     # Hilbert transform
     analytic_signal = hilbert(filtered)
     envelope = np.abs(analytic_signal)
@@ -319,112 +190,428 @@ def extract_amplitude_envelope(signal, sfreq, band=(13, 30), filter_order=4):
     return envelope
 
 
-def run_band_limited_dfa(epochs, channel="Cz", band=(13, 30), nvals=None):
-    """
-    Extracts the band-limited envelope from an EEG channel and runs DFA.
-
-    Parameters
-    ----------
-    epochs : mne.Epochs
-        MNE Epochs object.
-    channel : str
-        Name of the EEG channel to use.
-    band : tuple
-        Frequency band (Hz).
-    nvals : array or None
-        DFA window sizes (optional).
-
-    Returns
-    -------
-    alpha : float
-        DFA exponent from the amplitude envelope.
-    """
-    sfreq = epochs.info['sfreq']
-    signal = epochs.copy().pick(channel).get_data().reshape(-1)
-
-    # Extract envelope
-    envelope = extract_amplitude_envelope(signal, sfreq, band=band)
-
-    # Compute DFA
-    alpha = nolds.dfa(envelope, nvals=nvals)
-
-    return alpha
-
-def extract_wavelet_envelope(epochs, channel, sfreq, freq=13, n_cycles=7):
+def extract_wavelet_envelope(epochs, channel, freq=13, n_cycles=7):
     """
     Extracts the amplitude envelope from wavelet transform (single frequency).
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     epochs : mne.Epochs
-        MNE Epochs object.
+        MNE Epochs object
     channel : str
-        Channel name (e.g., 'Cz').
-    sfreq : float
-        Sampling frequency.
+        Channel name (e.g., 'Cz')
     freq : float
-        Frequency of interest (e.g., 13 Hz for alpha).
+        Frequency of interest (e.g., 13 Hz for alpha)
     n_cycles : int
-        Number of wavelet cycles.
+        Number of wavelet cycles
 
-    Returns
-    -------
+    Returns:
+    --------
     envelope : 1D array
-        Amplitude envelope over time (concatenated across epochs).
+        Amplitude envelope over time (concatenated across epochs)
     """
+    # Extract data and sampling frequency
     signal = epochs.copy().pick(channel).get_data()  # shape: (n_epochs, 1, n_times)
-    power = tfr_array_morlet(
+    sfreq = epochs.info['sfreq']
+    
+    # Apply Morlet wavelet transform
+    power = mne.time_frequency.tfr_array_morlet(
         data=signal,
         sfreq=sfreq,
         freqs=[freq],
         n_cycles=n_cycles,
         output='complex'
     )
-    envelope = np.abs(power[0, 0])  # shape: (n_times,)
-
+    
+    # Get amplitude
+    envelope = np.abs(power).squeeze()  # shape: (n_epochs, n_times)
+    
+    # Flatten across epochs if multiple epochs
+    if envelope.ndim > 1:
+        envelope = envelope.reshape(-1)
+        
     return envelope
 
-def compute_fluctuation_function(signal, segment_sizes):
-    """
-    Compute fluctuation function F(n) for DFA.
 
-    Parameters
-    ----------
-    signal : 1D array
-        Input signal (amplitude envelope).
-    segment_sizes : array
-        List of window sizes (samples)
+# -----------------------------------------------------------------------------
+# Detrended Fluctuation Analysis (DFA)
+# -----------------------------------------------------------------------------
 
-    Returns
-    -------
-    F : array
-        Fluctuation values for each window size.
+def compute_dfa(signal, scales=None, order=1, fit_range=None, return_fit=False):
     """
+    Perform Detrended Fluctuation Analysis on a signal.
+    
+    Parameters:
+    -----------
+    signal : ndarray
+        Input signal (1D array)
+    scales : ndarray or None
+        Array of window sizes in samples. If None, auto-generated.
+    order : int
+        Order of polynomial detrending (1=linear, 2=quadratic, etc.)
+    fit_range : tuple or None
+        (min_scale, max_scale) for fitting the scaling exponent.
+        If None, use all scales.
+    return_fit : bool
+        If True, return fluctuation values and scales along with alpha.
+    
+    Returns:
+    --------
+    alpha : float
+        DFA scaling exponent
+    [fluctuations, scales] : list, optional
+        Only returned if return_fit=True
+    """
+    # 1. Prepare the signal
+    signal = np.array(signal)
     signal = signal - np.mean(signal)
-    integrated = np.cumsum(signal)
-
-    F = []
-    for size in segment_sizes:
-        n_segments = len(integrated) // size
-        if n_segments < 2:
+    y = np.cumsum(signal)  # Integration
+    n_samples = len(y)
+    
+    # 2. Define scales if not provided
+    if scales is None:
+        min_scale = 10  # Minimum window size
+        max_scale = n_samples // 4  # Maximum window size
+        scales = np.unique(np.logspace(
+            np.log10(min_scale), np.log10(max_scale), 20, dtype=int
+        ))
+    
+    # 3. Compute fluctuations for each scale
+    fluctuations = []
+    used_scales = []
+    
+    for scale in scales:
+        if scale >= n_samples:
             continue
+        
+        # Number of non-overlapping windows
+        n_windows = n_samples // scale
+        if n_windows < 1:
+            continue
+            
+        used_scales.append(scale)
+        
+        # Create windows
+        windows = y[:n_windows*scale].reshape((n_windows, scale))
+        
+        # Detrend each window
+        t = np.arange(scale)
+        window_fluctuations = []
+        
+        for window in windows:
+            # Fit polynomial of specified order
+            p = np.polyfit(t, window, order)
+            fit = np.polyval(p, t)
+            
+            # Calculate fluctuation (root mean square)
+            residuals = window - fit
+            fluctuation = np.sqrt(np.mean(residuals**2))
+            window_fluctuations.append(fluctuation)
+        
+        # Average fluctuation over all windows
+        fluctuations.append(np.mean(window_fluctuations))
+    
+    # Convert to arrays
+    fluctuations = np.array(fluctuations)
+    used_scales = np.array(used_scales)
+    
+    if len(fluctuations) < 4:
+        raise ValueError("Not enough scales for reliable DFA. Try a longer signal.")
+        
+    # 4. Fit the scaling exponent (alpha)
+    if fit_range is not None:
+        min_scale, max_scale = fit_range
+        idx = (used_scales >= min_scale) & (used_scales <= max_scale)
+        if np.sum(idx) < 4:
+            print(f"Warning: Only {np.sum(idx)} points in fit range. Consider adjusting fit_range.")
+        log_scales = np.log10(used_scales[idx])
+        log_fluct = np.log10(fluctuations[idx])
+    else:
+        log_scales = np.log10(used_scales)
+        log_fluct = np.log10(fluctuations)
+    
+    # Linear regression to get alpha
+    slope, _, r_value, _, _ = linregress(log_scales, log_fluct)
+    alpha = slope
+    
+    if return_fit:
+        return alpha, fluctuations, used_scales
+    else:
+        return alpha
 
-        segments = integrated[:n_segments * size].reshape(n_segments, size)
-        fluctuations = []
-        for seg in segments:
-            t = np.arange(size)
-            trend = np.polyval(np.polyfit(t, seg, 1), t)
-            detrended = seg - trend
-            fluctuations.append(np.std(detrended))
 
-        F.append(np.mean(fluctuations))
+def compute_dfa_from_epochs(epochs, picks=None, band=None, order=1, fit_range=None, 
+                          envelope_method='hilbert'):
+    """
+    Compute DFA scaling exponents from MNE Epochs.
+    
+    Parameters:
+    -----------
+    epochs : mne.Epochs
+        MNE Epochs object
+    picks : list or None
+        Channel selection (names or indices)
+    band : tuple or None
+        (low_freq, high_freq) band to filter signal. If None, uses raw signal.
+    order : int
+        Order of polynomial detrending
+    fit_range : tuple or None
+        (min_scale, max_scale) for fitting. If None, uses all scales.
+    envelope_method : str
+        Method to compute amplitude envelope if band is provided:
+        'hilbert' or 'wavelet'
+    
+    Returns:
+    --------
+    alpha_values : dict
+        Dictionary with channel names as keys and DFA alphas as values
+    """
+    # Get data and channel names
+    if picks is None:
+        picks = epochs.ch_names
+    
+    data = epochs.get_data(picks=picks)
+    ch_names = epochs.ch_names if picks is None else picks
+    
+    if isinstance(ch_names, str):
+        ch_names = [ch_names]
+        
+    # Extract signals and apply filtering if needed
+    alpha_values = {}
+    sfreq = epochs.info['sfreq']
+    
+    for i, ch_name in enumerate(ch_names):
+        # Extract and flatten channel data
+        signal = data[:, i, :].flatten()
+        
+        # Apply bandpass filtering if specified
+        if band is not None:
+            if envelope_method == 'hilbert':
+                signal = extract_amplitude_envelope(signal, sfreq, band)
+            elif envelope_method == 'wavelet':
+                # Use central frequency of the band
+                center_freq = (band[0] + band[1]) / 2
+                signal = extract_wavelet_envelope(
+                    epochs.copy().pick(ch_name), 
+                    channel=ch_name, 
+                    freq=center_freq
+                )
+            else:
+                raise ValueError(f"Unknown envelope method: {envelope_method}")
+        
+        # Compute DFA
+        alpha = compute_dfa(signal, order=order, fit_range=fit_range)
+        alpha_values[ch_name] = alpha
+        
+    return alpha_values
 
-    return np.array(F)
+
+def plot_dfa_result(fluctuations, scales, alpha, fit_range=None, ax=None, 
+                  freq_band=None, sfreq=None, title=None):
+    """
+    Plot DFA results in log-log space.
+    
+    Parameters:
+    -----------
+    fluctuations : ndarray
+        Fluctuation values from DFA
+    scales : ndarray
+        Window sizes used in DFA
+    alpha : float
+        Scaling exponent
+    fit_range : tuple or None
+        (min_scale, max_scale) range used for fitting
+    ax : matplotlib.axes.Axes or None
+        Axes to plot on. If None, creates new figure.
+    freq_band : tuple or None
+        Frequency band if analyzing an envelope (for labeling)
+    sfreq : float or None
+        Sampling frequency (to convert scales to seconds)
+    title : str or None
+        Custom title for the plot
+        
+    Returns:
+    --------
+    ax : matplotlib.axes.Axes
+        The axes used for plotting
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Plot fluctuations
+    ax.loglog(scales, fluctuations, 'o-', label='Data')
+    
+    # Plot fit line
+    if fit_range is not None:
+        min_scale, max_scale = fit_range
+        idx = (scales >= min_scale) & (scales <= max_scale)
+        fit_scales = scales[idx]
+        
+        # Calculate fit line
+        log_scales = np.log10(fit_scales)
+        log_start = np.log10(fit_scales[0])
+        first_point_idx = np.where(scales == fit_scales[0])[0][0]
+        fit_line = 10**(np.log10(fluctuations[first_point_idx]) + 
+                      alpha * (log_scales - log_start))
+        
+        # Plot fit line and range markers
+        ax.loglog(fit_scales, fit_line, '--', linewidth=2, 
+                 label=f'α = {alpha:.3f}')
+        ax.axvline(min_scale, color='gray', linestyle=':', alpha=0.7)
+        ax.axvline(max_scale, color='gray', linestyle=':', alpha=0.7)
+    else:
+        # Use all scales for fit visualization
+        log_scales = np.log10(scales)
+        fit_line = 10**(np.log10(fluctuations[0]) + alpha * (log_scales - log_scales[0]))
+        ax.loglog(scales, fit_line, '--', linewidth=2, 
+                 label=f'α = {alpha:.3f}')
+    
+    # Create x-label based on available information
+    if sfreq is not None:
+        time_scales = scales / sfreq
+        ax.set_xlabel('Window Size (seconds)')
+        
+        # Add second x-axis for sample counts
+        ax2 = ax.twiny()
+        ax2.loglog(scales, fluctuations, alpha=0)  # Invisible, just to match scales
+        ax2.set_xlabel('Window Size (samples)')
+    else:
+        ax.set_xlabel('Window Size (samples)')
+    
+    # Create title based on available information
+    if title is None:
+        title = 'Detrended Fluctuation Analysis'
+        if freq_band is not None:
+            title = f'DFA - {freq_band[0]}-{freq_band[1]} Hz Band'
+    
+    # Formatting
+    ax.set_ylabel('Fluctuation F(n)')
+    ax.set_title(title)
+    ax.grid(True, which="both", ls="--", alpha=0.7)
+    ax.legend()
+    
+    return ax
 
 
-def compute_dfa_scaling(segment_sizes, F, fit_range=(10, 1000)):
-    idx = (segment_sizes >= fit_range[0]) & (segment_sizes <= fit_range[1])
-    log_n = np.log10(segment_sizes[idx])
-    log_F = np.log10(F[idx])
-    slope, intercept = np.polyfit(log_n, log_F, 1)
-    return slope, intercept
+def analyze_band_dfa(epochs, channel, bands, fit_range=None, order=1, plot=True):
+    """
+    Perform DFA across multiple frequency bands for a single channel.
+    
+    Parameters:
+    -----------
+    epochs : mne.Epochs
+        MNE Epochs object
+    channel : str
+        Channel name to analyze
+    bands : dict
+        Dictionary of frequency bands, e.g., {'alpha': (8, 13), 'beta': (13, 30)}
+    fit_range : tuple or None
+        (min_scale, max_scale) for fitting
+    order : int
+        Order of polynomial detrending
+    plot : bool
+        Whether to plot the results
+        
+    Returns:
+    --------
+    results : dict
+        Dictionary with band names as keys and DFA alphas as values
+    """
+    results = {}
+    signal = epochs.copy().pick(channel).get_data().reshape(-1)
+    sfreq = epochs.info['sfreq']
+    
+    if plot:
+        fig, axes = plt.subplots(len(bands), 1, figsize=(10, 4*len(bands)))
+        if len(bands) == 1:
+            axes = [axes]
+    
+    for i, (band_name, freq_range) in enumerate(bands.items()):
+        # Extract envelope
+        envelope = extract_amplitude_envelope(signal, sfreq, freq_range)
+        
+        # Compute DFA
+        alpha, fluctuations, scales = compute_dfa(
+            envelope, fit_range=fit_range, order=order, return_fit=True
+        )
+        results[band_name] = alpha
+        
+        # Plot if requested
+        if plot:
+            plot_dfa_result(
+                fluctuations, scales, alpha, fit_range=fit_range, ax=axes[i],
+                freq_band=freq_range, sfreq=sfreq, 
+                title=f"DFA - {band_name.capitalize()} Band ({freq_range[0]}-{freq_range[1]} Hz)"
+            )
+    
+    if plot:
+        plt.tight_layout()
+        plt.show()
+        
+    return results
+
+
+def compare_conditions_dfa(epochs_dict, channel, band=None, fit_range=None, order=1):
+    """
+    Compare DFA scaling exponents between conditions.
+    
+    Parameters:
+    -----------
+    epochs_dict : dict
+        Dictionary with condition names as keys and mne.Epochs as values
+    channel : str
+        Channel name to analyze
+    band : tuple or None
+        Frequency band to analyze. If None, uses raw signal.
+    fit_range : tuple or None
+        (min_scale, max_scale) for fitting
+    order : int
+        Order of polynomial detrending
+        
+    Returns:
+    --------
+    results : dict
+        Nested dictionary with conditions, values, and a comparison figure
+    """
+    results = {'alpha_values': {}}
+    
+    # Create figure for comparison
+    fig, axes = plt.subplots(1, len(epochs_dict), figsize=(5*len(epochs_dict), 5))
+    if len(epochs_dict) == 1:
+        axes = [axes]
+    
+    # Analyze each condition
+    for i, (condition, epochs) in enumerate(epochs_dict.items()):
+        signal = epochs.copy().pick(channel).get_data().reshape(-1)
+        sfreq = epochs.info['sfreq']
+        
+        # Apply filtering if band is specified
+        if band is not None:
+            signal = extract_amplitude_envelope(signal, sfreq, band)
+            title = f"{condition.upper()} - {band[0]}-{band[1]} Hz"
+        else:
+            title = f"{condition.upper()} - Raw Signal"
+        
+        # Compute DFA
+        alpha, fluctuations, scales = compute_dfa(
+            signal, fit_range=fit_range, order=order, return_fit=True
+        )
+        results['alpha_values'][condition] = alpha
+        
+        # Plot
+        plot_dfa_result(
+            fluctuations, scales, alpha, fit_range=fit_range, ax=axes[i],
+            freq_band=band, sfreq=sfreq, title=title
+        )
+    
+    plt.tight_layout()
+    results['figure'] = fig
+    
+    # Print summary
+    print("\n" + "="*50)
+    print("DFA SCALING EXPONENTS COMPARISON")
+    print("="*50)
+    for condition, alpha in results['alpha_values'].items():
+        print(f"{condition.upper()}: α = {alpha:.3f}")
+    
+    return results
