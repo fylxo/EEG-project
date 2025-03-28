@@ -1913,14 +1913,3 @@ def analyze_spatial_patterns(epochs_dict, picks=None, run_tsne=True):
             results['tsne'] = None
     
     return results
-
-
-
-
-
-
-
-
-
-
-
