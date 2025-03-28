@@ -678,34 +678,6 @@ def paired_ttest_plv(df, metric="PLV Mean", alpha=0.05):
             "p Real vs Imagined": p_real_imagined
         })
 
-    # Step 2: Apply Bonferroni correction (only to valid p-values)
-    valid_p_real_rest = [p for p in p_values_real_rest if not np.isnan(p)]
-    valid_p_real_imagined = [p for p in p_values_real_imagined if not np.isnan(p)]
-    
-    if valid_p_real_rest:
-        _, p_real_rest_corr, _, _ = multipletests(valid_p_real_rest, alpha=alpha, method='bonferroni')
-        
-        # Map corrected p-values back to results
-        p_idx = 0
-        for i, res in enumerate(results):
-            if not np.isnan(res["p Real vs Rest"]):
-                res["p Real vs Rest (Bonf)"] = p_real_rest_corr[p_idx]
-                p_idx += 1
-            else:
-                res["p Real vs Rest (Bonf)"] = np.nan
-    
-    if valid_p_real_imagined:
-        _, p_real_imagined_corr, _, _ = multipletests(valid_p_real_imagined, alpha=alpha, method='bonferroni')
-        
-        # Map corrected p-values back to results
-        p_idx = 0
-        for i, res in enumerate(results):
-            if not np.isnan(res["p Real vs Imagined"]):
-                res["p Real vs Imagined (Bonf)"] = p_real_imagined_corr[p_idx]
-                p_idx += 1
-            else:
-                res["p Real vs Imagined (Bonf)"] = np.nan
-
     df_stats = pd.DataFrame(results)
     return df_stats
 
@@ -1588,3 +1560,367 @@ def plot_time_window_results(window_results, window_names):
     if not np.all(np.isnan(real_imag_acc)):
         best_real_imag = np.nanargmax(real_imag_acc)
         print(f"Real vs. Imagined best in {window_names[best_real_imag]}: {interpretation[window_names[best_real_imag]]}")
+
+
+
+
+# ------------------------------------------------------------------------------------- 
+# PATTERN SIMILARITY AND DIMENSIONALITY REDUCTION
+# ------------------------------------------------------------------------------------- 
+
+
+def compute_rsa_and_plot_mds(epochs_dict, picks=None, metric="correlation"):
+    """
+    Compute Representational Similarity Analysis (RSA) and visualize using MDS.
+    
+    Parameters:
+    -----------
+    epochs_dict : dict
+        Dictionary with condition names as keys and mne.Epochs as values
+    picks : list or None
+        Channel picks. If None, all channels are used
+    metric : str
+        Distance metric to use (default = 'correlation')
+        
+    Returns:
+    --------
+    dist_matrix : ndarray
+        Pairwise distance matrix between conditions
+    coords : ndarray
+        2D coordinates from MDS projection
+    """
+    from sklearn.manifold import MDS
+    from sklearn.metrics import pairwise_distances
+    
+    condition_names = list(epochs_dict.keys())
+    
+    # Validate input
+    if len(condition_names) < 2:
+        raise ValueError("At least two conditions required for comparison")
+    
+    # Check that epochs have the same channels if picks is None
+    if picks is None:
+        ch_names_sets = [set(epochs.ch_names) for epochs in epochs_dict.values()]
+        if len(set.intersection(*ch_names_sets)) == 0:
+            raise ValueError("No common channels found across conditions")
+        
+    avg_patterns = []
+
+    # Step 1: Compute mean spatial pattern for each condition
+    for cond in condition_names:
+        if cond not in epochs_dict:
+            raise ValueError(f"Condition '{cond}' not found in epochs_dict")
+            
+        data = epochs_dict[cond].get_data(picks=picks)  # shape: (n_epochs, n_channels, n_times)
+        
+        if data.size == 0:
+            raise ValueError(f"No data found for condition '{cond}' with picks {picks}")
+            
+        avg_pattern = np.mean(data, axis=(0, 2))  # average over epochs and time -> shape: (n_channels,)
+        avg_patterns.append(avg_pattern)
+
+    avg_patterns = np.array(avg_patterns)
+
+    # Step 2: Compute pairwise dissimilarities
+    dist_matrix = pairwise_distances(avg_patterns, metric=metric)
+
+    # Step 3: MDS to project into 2D space
+    mds = MDS(n_components=2, dissimilarity='precomputed', random_state=42)
+    coords = mds.fit_transform(dist_matrix)
+
+    # Step 4: Plot
+    plt.figure(figsize=(6, 5))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(condition_names)))
+    
+    for i, cond in enumerate(condition_names):
+        plt.scatter(coords[i, 0], coords[i, 1], label=cond.upper(), 
+                   s=100, color=colors[i])
+        plt.text(coords[i, 0], coords[i, 1], cond.upper(), 
+                fontsize=12, ha='center', va='center')
+
+    plt.title("RSA (MDS Projection of Condition Similarities)")
+    plt.xlabel("MDS Dimension 1")
+    plt.ylabel("MDS Dimension 2")
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
+    # Print distance matrix
+    print("\nCondition Similarity (Distance Matrix):")
+    similarity_df = pd.DataFrame(dist_matrix, 
+                               index=condition_names, 
+                               columns=condition_names)
+    print(similarity_df)
+
+    return dist_matrix, coords
+
+
+def plot_tsne_all_trials(epochs_dict, picks=None, perplexity=30, n_components=2, max_samples=500):
+    """
+    Flatten and reduce all trials across conditions using t-SNE.
+    
+    Parameters:
+    -----------
+    epochs_dict : dict
+        Dictionary with condition names as keys and mne.Epochs as values
+    picks : list or None
+        Channel picks. If None, all channels are used
+    perplexity : int
+        Perplexity parameter for t-SNE (default=30)
+    n_components : int
+        Number of dimensions for t-SNE output (default=2)
+    max_samples : int or None
+        Maximum number of trials to include (downsampling for computational efficiency)
+        If None, all trials are used
+        
+    Returns:
+    --------
+    X_tsne : ndarray
+        Reduced dimensionality representation from t-SNE
+    y : list
+        Condition labels for each point in X_tsne
+    """
+    from sklearn.manifold import TSNE
+    
+    X = []
+    y = []
+    n_samples_per_condition = {}
+
+    for label, epochs in epochs_dict.items():
+        data = epochs.get_data(picks=picks)  # shape: (n_epochs, n_channels, n_times)
+        
+        # Skip empty data
+        if data.shape[0] == 0:
+            print(f"Warning: No data for condition '{label}', skipping")
+            continue
+            
+        n_samples_per_condition[label] = data.shape[0]
+        
+        # Flatten the data
+        flat = data.reshape(data.shape[0], -1)  # flatten each epoch to (n_epochs, n_features)
+        X.append(flat)
+        y.extend([label] * len(flat))
+
+    if not X:
+        raise ValueError("No valid data found in any condition")
+        
+    X = np.vstack(X)
+    total_samples = X.shape[0]
+    
+    # Downsample if needed
+    if max_samples is not None and total_samples > max_samples:
+        print(f"Downsampling from {total_samples} to {max_samples} trials...")
+        indices = np.random.choice(total_samples, max_samples, replace=False)
+        X = X[indices]
+        y = [y[i] for i in indices]
+    
+    # Run t-SNE
+    print(f"Running t-SNE on {X.shape[0]} trials with {X.shape[1]} features...")
+    tsne = TSNE(n_components=n_components, perplexity=min(perplexity, X.shape[0]-1), 
+                random_state=42, n_jobs=-1)
+    X_tsne = tsne.fit_transform(X)
+
+    # Plot for 2D case
+    if n_components == 2:
+        plt.figure(figsize=(8, 6))
+        
+        unique_labels = np.unique(y)
+        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
+        
+        for i, label in enumerate(unique_labels):
+            idx = [j for j, val in enumerate(y) if val == label]
+            plt.scatter(X_tsne[idx, 0], X_tsne[idx, 1], 
+                       label=f"{label} (n={n_samples_per_condition.get(label, len(idx))})", 
+                       alpha=0.7, color=colors[i])
+                       
+        plt.title("Trial-wise t-SNE Projection")
+        plt.xlabel("Dimension 1")
+        plt.ylabel("Dimension 2")
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.show()
+    
+    # Print statistical summary
+    print("\nSample distribution:")
+    for label in np.unique(y):
+        count = y.count(label)
+        print(f"  {label}: {count} trials ({count/len(y)*100:.1f}%)")
+
+    return X_tsne, y
+
+
+def compute_topographic_distances(epochs_dict, picks=None):
+    """
+    Compute pairwise distances between condition topographies.
+    
+    Parameters:
+    -----------
+    epochs_dict : dict
+        Dictionary with condition names as keys and mne.Epochs as values
+    picks : list or None
+        Channel picks. If None, all channels are used
+        
+    Returns:
+    --------
+    distances : dict
+        Dictionary with pairwise distance metrics
+    topographies : dict
+        Dictionary with average spatial patterns for each condition
+    """
+    from scipy.spatial.distance import cosine, euclidean, correlation
+    
+    # Extract topographic patterns
+    topographies = {}
+    for cond, epochs in epochs_dict.items():
+        data = epochs.get_data(picks=picks)
+        
+        if data.size == 0:
+            print(f"Warning: No data for condition '{cond}', skipping")
+            continue
+            
+        # Average over epochs and time points
+        topographies[cond] = np.mean(data, axis=(0, 2))
+    
+    if len(topographies) < 2:
+        raise ValueError("At least two valid conditions required for distance computation")
+    
+    # Compute pairwise distances
+    labels = list(topographies.keys())
+    distances = {}
+    
+    for i in range(len(labels)):
+        for j in range(i+1, len(labels)):
+            cond1, cond2 = labels[i], labels[j]
+            v1, v2 = topographies[cond1], topographies[cond2]
+            
+            # Compute multiple distance metrics
+            distances[f"{cond1} vs {cond2}"] = {
+                "cosine": cosine(v1, v2),
+                "euclidean": euclidean(v1, v2),
+                "correlation": correlation(v1, v2)
+            }
+    
+    # Create results table
+    results = []
+    for pair, metrics in distances.items():
+        results.append({
+            "Comparison": pair,
+            "Cosine Distance": metrics["cosine"],
+            "Euclidean Distance": metrics["euclidean"],
+            "Correlation Distance": metrics["correlation"]
+        })
+    
+    # Display results
+    print("\nTopographic Distance Metrics:")
+    distance_df = pd.DataFrame(results)
+    print(distance_df)
+    
+    # Visualize topographic patterns
+    n_conds = len(topographies)
+    fig, axes = plt.subplots(1, n_conds, figsize=(4*n_conds, 4))
+    
+    if n_conds == 1:
+        axes = [axes]  # Handle case with only one condition
+        
+    for i, (cond, topo) in enumerate(topographies.items()):
+        # Get channel info if available
+        info = epochs_dict[cond].info if hasattr(epochs_dict[cond], 'info') else None
+        
+        if info and picks is None:
+            # Plot as topographic map if we have channel positions
+            try:
+                mne.viz.plot_topomap(topo, info, axes=axes[i], show=False)
+                axes[i].set_title(f"{cond}")
+            except Exception as e:
+                # Fall back to bar plot if topographic plotting fails
+                print(f"Could not create topomap for {cond}: {e}")
+                axes[i].bar(range(len(topo)), topo)
+                axes[i].set_title(f"{cond}")
+        else:
+            # Simple bar plot of values
+            axes[i].bar(range(len(topo)), topo)
+            axes[i].set_title(f"{cond}")
+    
+    plt.tight_layout()
+    plt.show()
+            
+    return distances, topographies
+
+
+def analyze_spatial_patterns(epochs_dict, picks=None, run_tsne=True):
+    """
+    Perform comprehensive spatial pattern analysis including RSA, 
+    topographic distances, and optionally t-SNE.
+    
+    Parameters:
+    -----------
+    epochs_dict : dict
+        Dictionary with condition names as keys and mne.Epochs as values
+    picks : list or None
+        Channel picks. If None, all channels are used
+    run_tsne : bool
+        Whether to run t-SNE analysis (computationally intensive)
+        
+    Returns:
+    --------
+    results : dict
+        Dictionary with results from all analyses
+    """
+    results = {}
+    
+    # 1. RSA and MDS visualization
+    print("\n" + "="*80)
+    print("REPRESENTATIONAL SIMILARITY ANALYSIS (RSA)")
+    print("="*80)
+    try:
+        dist_matrix, coords = compute_rsa_and_plot_mds(epochs_dict, picks)
+        results['rsa'] = {
+            'distance_matrix': dist_matrix,
+            'mds_coordinates': coords
+        }
+    except Exception as e:
+        print(f"Error in RSA analysis: {e}")
+        results['rsa'] = None
+    
+    # 2. Topographic distance analysis
+    print("\n" + "="*80)
+    print("TOPOGRAPHIC DISTANCE ANALYSIS")
+    print("="*80)
+    try:
+        distances, topographies = compute_topographic_distances(epochs_dict, picks)
+        results['topographic'] = {
+            'distances': distances,
+            'patterns': topographies
+        }
+    except Exception as e:
+        print(f"Error in topographic distance analysis: {e}")
+        results['topographic'] = None
+    
+    # 3. Optional t-SNE analysis
+    if run_tsne:
+        print("\n" + "="*80)
+        print("t-SNE TRIAL PROJECTION")
+        print("="*80)
+        try:
+            X_tsne, labels = plot_tsne_all_trials(epochs_dict, picks)
+            results['tsne'] = {
+                'coordinates': X_tsne,
+                'labels': labels
+            }
+        except Exception as e:
+            print(f"Error in t-SNE analysis: {e}")
+            results['tsne'] = None
+    
+    return results
+
+
+
+
+
+
+
+
+
+
+
