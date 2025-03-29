@@ -314,6 +314,88 @@ def plot_plv_coherence(df, metric="PLV Mean", figsize=(14, 7)):
     plt.show()
 
 
+def plot_normalized_plv_coherence(df, metric="PLV Mean", figsize=(14, 7)):
+    """
+    Plot PLV or Coherence normalized to the Rest condition (Real/Imagined divided by Rest).
+    Rest condition is removed from the plot after normalization.
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        Original PLV/Coherence DataFrame with 'Subject', 'Channel Pair', 'Condition', and metric columns.
+    metric : str
+        The metric to normalize and plot: e.g., "PLV Mean"
+    figsize : tuple
+        Size of the matplotlib figure
+    """
+    if metric not in ["PLV Mean", "PLV Max", "Coherence Mean", "Coherence Max"]:
+        raise ValueError("Invalid metric.")
+
+    # Normalize each value by Rest for that subject and channel pair
+    df_pivot = df.pivot_table(index=["Subject", "Channel Pair"], columns="Condition", values=metric)
+
+    # Only keep rows with valid Rest values
+    df_pivot = df_pivot.dropna(subset=["Rest"])
+
+    # Normalize Real and Imagined by Rest
+    df_norm = df_pivot.copy()
+    df_norm["Real"] = df_norm["Real"] / df_norm["Rest"]
+    df_norm["Imagined"] = df_norm["Imagined"] / df_norm["Rest"]
+
+    # Melt into long-form DataFrame for seaborn plotting
+    df_long = df_norm[["Real", "Imagined"]].reset_index().melt(
+        id_vars=["Subject", "Channel Pair"],
+        value_vars=["Real", "Imagined"],
+        var_name="Condition",
+        value_name=metric
+    )
+
+    # Plot
+    plt.figure(figsize=figsize)
+    sns.barplot(data=df_long, x="Channel Pair", y=metric, hue="Condition", palette="Set2")
+
+    plt.xlabel("Electrode Pair")
+    plt.ylabel(f"Normalized {metric} (vs Rest)")
+    plt.title(f"Normalized {metric} (Real/Imagined ÷ Rest)")
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', alpha=0.3)
+    plt.legend(title="Condition")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_ttest_summary(df_stats, alpha=0.05, figsize=(10, 6)):
+    """
+    Graphical summary of paired t-tests with p-values and significance indication.
+
+    Parameters:
+    -----------
+    df_stats : DataFrame
+        Output from paired_ttest_plv
+    alpha : float
+        Significance level to mark on the plot
+    figsize : tuple
+        Size of the figure
+    """
+    # Select only columns with t-test p-values
+    pval_data = df_stats[["Channel Pair", "p Real vs Rest", "p Real vs Imagined"]].copy()
+    pval_data.set_index("Channel Pair", inplace=True)
+
+    # Optionally apply -log10 to emphasize low p-values
+    pval_heatmap = -np.log10(pval_data)
+
+    plt.figure(figsize=figsize)
+    sns.heatmap(pval_heatmap, annot=pval_data.round(4), fmt="", cmap="coolwarm", cbar_kws={'label': '-log10(p-value)'})
+
+    plt.title("Paired T-Test P-Values (Real vs Rest & Real vs Imagined)")
+    plt.xlabel("Comparison")
+    plt.ylabel("Channel Pair")
+    plt.tight_layout()
+    plt.show()
+
+
+
+
 # -----------------------------------------------------------------------------
 # CLASSIFICATION RESULTS VISUALIZATION
 # -----------------------------------------------------------------------------
