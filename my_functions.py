@@ -622,6 +622,55 @@ def analyze_pairwise_plv_coherence(subjects, eeg_data, conditions, channel_pairs
     return df
 
 
+def plot_normalized_plv_coherence(df, metric="PLV Mean", figsize=(14, 7)):
+    """
+    Plot PLV or Coherence normalized to the Rest condition.
+    Rest condition is not shown but serves as the baseline (value 1.0).
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        Original PLV/Coherence DataFrame
+    metric : str
+        Metric to normalize: e.g., "PLV Mean"
+    figsize : tuple
+        Size of the matplotlib figure
+    """
+    if metric not in ["PLV Mean", "PLV Max", "Coherence Mean", "Coherence Max"]:
+        raise ValueError("Invalid metric.")
+
+    df_pivot = df.pivot_table(index=["Subject", "Channel Pair"], columns="Condition", values=metric)
+    df_pivot = df_pivot.dropna(subset=["Rest"])
+
+    # Normalize Real and Imagined
+    df_norm = df_pivot.copy()
+    df_norm["Real"] = df_norm["Real"] / df_norm["Rest"]
+    df_norm["Imagined"] = df_norm["Imagined"] / df_norm["Rest"]
+
+    df_long = df_norm[["Real", "Imagined"]].reset_index().melt(
+        id_vars=["Subject", "Channel Pair"],
+        var_name="Condition",
+        value_name=metric
+    )
+
+    # Plot
+    plt.figure(figsize=figsize)
+    ax = sns.barplot(data=df_long, x="Channel Pair", y=metric, hue="Condition", palette="Set2")
+
+    # Reference line for Rest (value = 1)
+    plt.axhline(1.0, color='gray', linestyle='--', linewidth=1.2, label="Rest Baseline")
+
+    # Labels
+    plt.xlabel("Electrode Pair")
+    plt.ylabel(f"Normalized {metric} (÷ Rest)")
+    plt.title(f"Normalized {metric} (Real/Imagined divided by Rest)")
+    plt.xticks(rotation=45)
+    plt.legend(title="Condition")
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
 def paired_ttest_plv(df, metric="PLV Mean", alpha=0.05):
     """
     Run paired t-tests for PLV between conditions on each channel pair.
@@ -719,6 +768,568 @@ def report_paired_ttests(df_stats):
                 print(f"     After Bonferroni correction: p = {p2_corr:.4f} ({sig})")
         else:
             print("   Real vs Imagined: Insufficient data for comparison")
+
+
+def plot_ttest_summary(df_stats, alpha=0.05, figsize=(10, 6)):
+    """
+    Graphical summary of t-test p-values with significance indication.
+    
+    Parameters:
+    -----------
+    df_stats : DataFrame
+        DataFrame from paired_ttest_plv
+    alpha : float
+        Significance threshold
+    figsize : tuple
+        Size of the figure
+    """
+    import matplotlib.colors as mcolors
+
+    pval_df = df_stats[["Channel Pair", "p Real vs Rest", "p Real vs Imagined"]].copy()
+    pval_df.set_index("Channel Pair", inplace=True)
+
+    # Replace missing with 1 (non-significant)
+    pval_matrix = pval_df.fillna(1.0)
+
+    # Create mask for significance
+    sig_mask = pval_matrix <= alpha
+
+    # Custom colormap: light = non-sig, dark = sig
+    cmap = sns.light_palette("crimson", as_cmap=True)
+
+    plt.figure(figsize=figsize)
+    ax = sns.heatmap(
+        pval_matrix,
+        cmap=cmap,
+        annot=pval_matrix.applymap(lambda x: f"{x:.4f}"),
+        fmt="",
+        linewidths=0.5,
+        linecolor='gray',
+        cbar_kws={"label": "p-value"},
+        vmin=0, vmax=1
+    )
+
+    # Overlay asterisk for significant results
+    for y in range(pval_matrix.shape[0]):
+        for x in range(pval_matrix.shape[1]):
+            if sig_mask.iloc[y, x]:
+                ax.text(x + 0.5, y + 0.5, "*", ha='center', va='center', fontsize=18, color='black')
+
+    ax.set_title(f"T-test P-Values (Significant p ≤ {alpha})\n* = statistically significant")
+    ax.set_xlabel("Comparison")
+    ax.set_ylabel("Channel Pair")
+    plt.tight_layout()
+    plt.show()
+
+
+
+# ------------------------------------------------------------------------------------- 
+# iPLV AND wPLI FUNCTIONS
+# ------------------------------------------------------------------------------------- 
+
+def compute_iplv_matrix(epochs):
+    """
+    Compute imaginary PLV matrix across all channels in an Epochs object.
+    iPLV only considers the imaginary part of the phase difference, 
+    making it less susceptible to volume conduction.
+    
+    Parameters:
+    -----------
+    epochs : mne.Epochs
+        Epoched EEG data
+        
+    Returns:
+    --------
+    iplv_matrix : ndarray
+        Imaginary Phase Locking Value matrix (n_channels x n_channels)
+    """
+    data = epochs.get_data()
+    n_epochs, n_channels, n_times = data.shape
+    iplv_accum = np.zeros((n_channels, n_channels))
+
+    for epoch_idx in range(n_epochs):
+        epoch_data = data[epoch_idx]
+        analytic_signal = hilbert(epoch_data, axis=1)
+        phase_data = np.angle(analytic_signal)
+
+        iplv_epoch = np.zeros((n_channels, n_channels))
+        for i in range(n_channels):
+            for j in range(n_channels):
+                phase_diff = phase_data[i] - phase_data[j]
+                # Take absolute value of the imaginary part only
+                iplv_epoch[i, j] = np.abs(np.mean(np.sin(phase_diff)))
+
+        iplv_accum += iplv_epoch
+
+    iplv_matrix = iplv_accum / n_epochs
+    return iplv_matrix
+
+
+def compute_wpli_matrix(epochs):
+    """
+    Compute weighted Phase Lag Index (wPLI) matrix across all channels.
+    wPLI is robust against volume conduction and common reference effects.
+    
+    Parameters:
+    -----------
+    epochs : mne.Epochs
+        Epoched EEG data
+        
+    Returns:
+    --------
+    wpli_matrix : ndarray
+        Weighted Phase Lag Index matrix (n_channels x n_channels)
+    """
+    data = epochs.get_data()
+    n_epochs, n_channels, n_times = data.shape
+    
+    # Initialize cross-spectral density matrices
+    imag_sum = np.zeros((n_channels, n_channels))
+    imag_abs_sum = np.zeros((n_channels, n_channels))
+    
+    for epoch_idx in range(n_epochs):
+        epoch_data = data[epoch_idx]
+        analytic_signal = hilbert(epoch_data, axis=1)
+        
+        for i in range(n_channels):
+            for j in range(i+1, n_channels):  # Upper triangle only
+                cross_spectrum = analytic_signal[i] * np.conj(analytic_signal[j])
+                imag_part = np.imag(cross_spectrum)
+                
+                # Accumulate for wPLI computation
+                imag_sum[i, j] += np.mean(imag_part)
+                imag_abs_sum[i, j] += np.mean(np.abs(imag_part))
+    
+    # Compute wPLI in upper triangle
+    wpli_matrix = np.zeros((n_channels, n_channels))
+    for i in range(n_channels):
+        for j in range(i+1, n_channels):
+            if imag_abs_sum[i, j] > 0:
+                wpli_matrix[i, j] = np.abs(imag_sum[i, j]) / imag_abs_sum[i, j]
+    
+    # Make symmetric
+    wpli_matrix = wpli_matrix + wpli_matrix.T
+    
+    return wpli_matrix
+
+
+def compute_iplv_pairwise(epochs, ch1="C3", ch2="C4"):
+    """
+    Compute imaginary PLV between two channels across all epochs.
+    
+    Parameters:
+    -----------
+    epochs : mne.Epochs
+        Epoched EEG data
+    ch1, ch2 : str
+        Channel names to compute iPLV between
+        
+    Returns:
+    --------
+    iplv : ndarray
+        iPLV time series
+    iplv_mean : float
+        Mean iPLV value
+    iplv_max : float
+        Maximum iPLV value
+    """
+    if ch1 not in epochs.ch_names or ch2 not in epochs.ch_names:
+        raise ValueError(f"Channels {ch1} and {ch2} not found in EEG data.")
+
+    data = epochs.get_data(picks=[ch1, ch2])
+
+    if data.shape[0] == 0:
+        return np.nan, np.nan, np.nan
+
+    analytic_signal = hilbert(data)
+    phase_data = np.angle(analytic_signal)
+
+    phase_diff = phase_data[:, 0, :] - phase_data[:, 1, :]
+    iplv = np.abs(np.mean(np.sin(phase_diff), axis=0))
+
+    iplv_mean = np.mean(iplv)
+    iplv_max = np.max(iplv)
+
+    return iplv, iplv_mean, iplv_max
+
+
+def compute_wpli_pairwise(epochs, ch1="C3", ch2="C4"):
+    """
+    Compute weighted Phase Lag Index (wPLI) between two channels.
+    
+    Parameters:
+    -----------
+    epochs : mne.Epochs
+        Epoched EEG data
+    ch1, ch2 : str
+        Channel names to compute wPLI between
+        
+    Returns:
+    --------
+    wpli : float
+        wPLI value
+    """
+    if ch1 not in epochs.ch_names or ch2 not in epochs.ch_names:
+        raise ValueError(f"Channels {ch1} and {ch2} not found in EEG data.")
+
+    data = epochs.get_data(picks=[ch1, ch2])
+
+    if data.shape[0] == 0:
+        return np.nan, np.nan
+
+    # Compute analytic signal
+    analytic_signal = hilbert(data)
+    
+    # Get signals for each channel
+    ch1_signal = analytic_signal[:, 0, :]
+    ch2_signal = analytic_signal[:, 1, :]
+    
+    # Compute cross-spectrum for each epoch
+    imag_sum = 0
+    imag_abs_sum = 0
+    
+    for epoch_idx in range(data.shape[0]):
+        cross_spectrum = ch1_signal[epoch_idx] * np.conj(ch2_signal[epoch_idx])
+        imag_part = np.imag(cross_spectrum)
+        
+        imag_sum += np.mean(imag_part)
+        imag_abs_sum += np.mean(np.abs(imag_part))
+    
+    # Calculate wPLI
+    wpli = np.abs(imag_sum) / (imag_abs_sum + 1e-10)  # Add small value to avoid division by zero
+    
+    return wpli, wpli  # Return twice for consistency with other functions (mean/max)
+
+def analyze_pairwise_connectivity(subjects, eeg_data, conditions, channel_pairs, metrics=["iPLV", "wPLI"]):
+    """
+    Computes iPLV and wPLI for multiple subject-channel pairs.
+    
+    Parameters:
+    -----------
+    subjects : list
+        List of subject IDs
+    eeg_data : dict
+        Dictionary with subject-level preprocessed data
+    conditions : dict
+        Dictionary mapping condition names to keys in eeg_data
+    channel_pairs : list
+        List of tuples with channel pairs (e.g., [("C3", "C4")])
+    metrics : list
+        List of metrics to compute (default = ["iPLV", "wPLI"])
+        
+    Returns:
+    --------
+    df : DataFrame
+        DataFrame with connectivity values for all pairs, subjects & conditions
+    """
+    results = []
+
+    for subject in subjects:
+        print(f"🧠 Subject: {subject}")
+
+        for cond_key, cond_value in conditions.items():
+            print(f"  ➡️ Condition: {cond_key}")
+
+            # Skip if subject or condition not available
+            if subject not in eeg_data or not eeg_data[subject].get(cond_value):
+                print(f"  ⚠️ No data for {subject} - {cond_value}")
+                continue
+                
+            # Merge runs
+            epochs = mne.concatenate_epochs(eeg_data[subject][cond_value])
+
+            for ch1, ch2 in channel_pairs:
+                try:
+                    result_row = {
+                        "Subject": subject,
+                        "Condition": cond_key.capitalize(),
+                        "Channel Pair": f"{ch1}-{ch2}"
+                    }
+                    
+                    # Compute iPLV if requested
+                    if "iPLV" in metrics:
+                        _, iplv_mean, iplv_max = compute_iplv_pairwise(epochs, ch1=ch1, ch2=ch2)
+                        result_row["iPLV Mean"] = iplv_mean
+                        result_row["iPLV Max"] = iplv_max
+                        
+                    # Compute wPLI if requested
+                    if "wPLI" in metrics:
+                        wpli_value, _ = compute_wpli_pairwise(epochs, ch1=ch1, ch2=ch2)
+                        result_row["wPLI"] = wpli_value
+                        
+                    # Add regular coherence for comparison
+                    if "Coherence" in metrics:
+                        _, coh_spectrum, coh_mean, coh_max = compute_coherence(
+                            epochs, ch1=ch1, ch2=ch2, fmin=8, fmax=30
+                        )
+                        result_row["Coherence Mean"] = coh_mean
+                        result_row["Coherence Max"] = coh_max
+
+                    results.append(result_row)
+                except Exception as e:
+                    print(f"  ⚠️ Error processing {ch1}-{ch2}: {e}")
+
+    df = pd.DataFrame(results)
+    return df
+
+
+def paired_ttest_connectivity(df, metric="iPLV Mean", alpha=0.05):
+    """
+    Run paired t-tests for connectivity metrics between conditions on each channel pair.
+    Applies Bonferroni correction for multiple comparisons.
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        DataFrame with connectivity results
+    metric : str
+        Which metric to use for t-tests (e.g., "iPLV Mean", "wPLI")
+    alpha : float
+        Significance level before correction
+        
+    Returns:
+    --------
+    df_stats : DataFrame
+        DataFrame with t-test results
+    """
+    from scipy.stats import ttest_rel
+    
+    pairs = df["Channel Pair"].unique()
+    results = []
+
+    # Step 1: Collect all p-values for both comparisons
+    p_values_real_rest = []
+    p_values_real_imagined = []
+
+    for pair in pairs:
+        df_pair = df[df["Channel Pair"] == pair]
+        pivot_df = df_pair.pivot(index="Subject", columns="Condition", values=metric)
+        pivot_df = pivot_df.dropna()
+
+        # Only perform test if we have both conditions for at least 2 subjects
+        if ("Real" in pivot_df.columns and "Rest" in pivot_df.columns and 
+            len(pivot_df) >= 2):
+            t_real_rest, p_real_rest = ttest_rel(pivot_df["Real"], pivot_df["Rest"])
+            p_values_real_rest.append(p_real_rest)
+        else:
+            t_real_rest, p_real_rest = np.nan, np.nan
+            
+        if ("Real" in pivot_df.columns and "Imagined" in pivot_df.columns and 
+            len(pivot_df) >= 2):
+            t_real_imagined, p_real_imagined = ttest_rel(pivot_df["Real"], pivot_df["Imagined"])
+            p_values_real_imagined.append(p_real_imagined)
+        else:
+            t_real_imagined, p_real_imagined = np.nan, np.nan
+
+        results.append({
+            "Channel Pair": pair,
+            "t Real vs Rest": t_real_rest,
+            "p Real vs Rest": p_real_rest,
+            "t Real vs Imagined": t_real_imagined,
+            "p Real vs Imagined": p_real_imagined
+        })
+
+    # Apply Bonferroni correction
+    p_values_real_rest = [p for p in p_values_real_rest if not np.isnan(p)]
+    p_values_real_imagined = [p for p in p_values_real_imagined if not np.isnan(p)]
+    
+    if p_values_real_rest:
+        _, p_corrected_real_rest, _, _ = multipletests(
+            p_values_real_rest, alpha=alpha, method='bonferroni')
+    
+    if p_values_real_imagined:
+        _, p_corrected_real_imagined, _, _ = multipletests(
+            p_values_real_imagined, alpha=alpha, method='bonferroni')
+    
+    # Add corrected p-values to results
+    p_rest_idx = 0
+    p_imag_idx = 0
+    
+    for i, result in enumerate(results):
+        if not np.isnan(result["p Real vs Rest"]) and p_values_real_rest:
+            results[i]["p Real vs Rest (Bonf)"] = p_corrected_real_rest[p_rest_idx]
+            p_rest_idx += 1
+            
+        if not np.isnan(result["p Real vs Imagined"]) and p_values_real_imagined:
+            results[i]["p Real vs Imagined (Bonf)"] = p_corrected_real_imagined[p_imag_idx]
+            p_imag_idx += 1
+
+    df_stats = pd.DataFrame(results)
+    return df_stats
+
+
+def plot_iplv_wpli_comparison(df, metrics=["iPLV Mean", "wPLI"], figsize=(14, 8)):
+    """
+    Plot comparison of different connectivity metrics across conditions.
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        DataFrame with connectivity metrics
+    metrics : list
+        List of metrics to include in the plot
+    figsize : tuple
+        Figure size
+    """
+    import seaborn as sns
+    
+    # Reshape data for plotting
+    plot_data = []
+    
+    for metric in metrics:
+        if metric in df.columns:
+            temp_df = df[["Subject", "Condition", "Channel Pair", metric]].copy()
+            temp_df["Metric"] = metric
+            temp_df["Value"] = temp_df[metric]
+            plot_data.append(temp_df[["Subject", "Condition", "Channel Pair", "Metric", "Value"]])
+    
+    if not plot_data:
+        raise ValueError("No valid metrics found in DataFrame")
+        
+    plot_df = pd.concat(plot_data)
+    
+    # Create plot
+    plt.figure(figsize=figsize)
+    
+    for i, metric in enumerate(metrics):
+        plt.subplot(1, len(metrics), i+1)
+        sns.boxplot(data=plot_df[plot_df["Metric"] == metric], 
+                   x="Channel Pair", y="Value", hue="Condition",
+                   palette="Set2")
+        
+        plt.title(f"{metric} by Channel Pair")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # Only show legend for the first plot to save space
+        if i > 0:
+            plt.legend([])
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_connectivity_matrix(matrix, ch_names, title="Connectivity Matrix", cmap="viridis", vmin=None, vmax=None):
+    """
+    Plot connectivity matrix (iPLV, wPLI, etc.) as heatmap.
+    
+    Parameters:
+    -----------
+    matrix : ndarray
+        Square connectivity matrix
+    ch_names : list
+        Channel names
+    title : str
+        Plot title
+    cmap : str
+        Colormap name
+    vmin, vmax : float or None
+        Min and max values for color scaling
+    """
+    plt.figure(figsize=(10, 8))
+    im = plt.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax)
+    plt.colorbar(im, label="Connectivity Strength")
+    
+    # Add channel labels
+    plt.xticks(range(len(ch_names)), ch_names, rotation=90)
+    plt.yticks(range(len(ch_names)), ch_names)
+    
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_connectivity_difference(matrix1, matrix2, ch_names, 
+                               title="Connectivity Difference", cmap="coolwarm"):
+    """
+    Plot difference between two connectivity matrices.
+    
+    Parameters:
+    -----------
+    matrix1, matrix2 : ndarray
+        Square connectivity matrices
+    ch_names : list
+        Channel names
+    title : str
+        Plot title
+    cmap : str
+        Colormap name (default coolwarm for difference plots)
+    """
+    diff_matrix = matrix1 - matrix2
+    
+    # Determine symmetric scale for better visualization
+    maxval = max(abs(diff_matrix.min()), abs(diff_matrix.max()))
+    
+    plt.figure(figsize=(10, 8))
+    im = plt.imshow(diff_matrix, cmap=cmap, vmin=-maxval, vmax=maxval)
+    plt.colorbar(im, label="Connectivity Difference")
+    
+    # Add channel labels
+    plt.xticks(range(len(ch_names)), ch_names, rotation=90)
+    plt.yticks(range(len(ch_names)), ch_names)
+    
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_normalized_connectivity(df, metrics=["iPLV Mean", "wPLI"], figsize=(14, 7)):
+    """
+    Plot connectivity metrics normalized to the Rest condition.
+    Rest condition is not shown but serves as the baseline (value 1.0).
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        Original connectivity DataFrame
+    metrics : list
+        Metrics to normalize and plot
+    figsize : tuple
+        Size of the matplotlib figure
+    """
+    import seaborn as sns
+    
+    for metric in metrics:
+        if metric not in df.columns:
+            print(f"Warning: Metric '{metric}' not found in DataFrame, skipping")
+            continue
+            
+        print(f"\nPlotting normalized {metric}:")
+            
+        df_pivot = df.pivot_table(index=["Subject", "Channel Pair"], columns="Condition", values=metric)
+        df_pivot = df_pivot.dropna(subset=["Rest"])
+
+        # Normalize Real and Imagined
+        df_norm = df_pivot.copy()
+        df_norm["Real"] = df_norm["Real"] / df_norm["Rest"]
+        df_norm["Imagined"] = df_norm["Imagined"] / df_norm["Rest"]
+
+        df_long = df_norm[["Real", "Imagined"]].reset_index().melt(
+            id_vars=["Subject", "Channel Pair"],
+            var_name="Condition",
+            value_name=metric
+        )
+
+        # Plot
+        plt.figure(figsize=figsize)
+        ax = sns.barplot(data=df_long, x="Channel Pair", y=metric, hue="Condition", palette="Set2")
+
+        # Reference line for Rest (value = 1)
+        plt.axhline(1.0, color='gray', linestyle='--', linewidth=1.2, label="Rest Baseline")
+
+        # Labels
+        plt.xlabel("Electrode Pair")
+        plt.ylabel(f"Normalized {metric} (÷ Rest)")
+        plt.title(f"Normalized {metric} (Real/Imagined divided by Rest)")
+        plt.xticks(rotation=45)
+        plt.legend(title="Condition")
+        plt.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+
+
 
 
 # ------------------------------------------------------------------------------------- 
