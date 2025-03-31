@@ -1210,6 +1210,122 @@ def plot_iplv_wpli_comparison(df, metrics=["iPLV Mean", "wPLI"], figsize=(14, 8)
     plt.tight_layout()
     plt.show()
 
+def plot_connectivity_barplots(df, metrics=["iPLV Mean", "wPLI"], figsize=(12, 6), 
+                               palette="Set2", error_bars=True, save_path=None):
+    """
+    Create separate bar plots for each connectivity metric.
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        DataFrame with connectivity metrics
+    metrics : list
+        List of metrics to plot
+    figsize : tuple
+        Size for each individual figure
+    palette : str or list
+        Color palette for the bars
+    error_bars : bool
+        Whether to include error bars (standard error)
+    save_path : str or None
+        Path to save the figures (None = don't save)
+        Will save as {save_path}_{metric}.png
+    
+    Returns:
+    --------
+    fig_dict : dict
+        Dictionary containing the created figures
+    """
+    import seaborn as sns
+    from matplotlib.ticker import MaxNLocator
+    
+    fig_dict = {}  # Store created figures
+    
+    for metric in metrics:
+        if metric not in df.columns:
+            print(f"Warning: Metric '{metric}' not found in DataFrame, skipping")
+            continue
+            
+        # Create figure
+        fig, ax = plt.subplots(figsize=figsize)
+        fig_dict[metric] = fig
+        
+        # Calculate means and standard errors for cleaner bar plots
+        summary_df = df.groupby(['Channel Pair', 'Condition'])[metric].agg(['mean', 'std', 'count']).reset_index()
+        summary_df['se'] = summary_df['std'] / np.sqrt(summary_df['count'])
+        
+        # Create bar plot
+        if error_bars:
+            # With error bars
+            sns.barplot(
+                data=summary_df,
+                x='Channel Pair',
+                y='mean',
+                hue='Condition',
+                palette=palette,
+                errorbar=('se', 1),  # Show standard error
+                ax=ax
+            )
+        else:
+            # Without error bars
+            sns.barplot(
+                data=summary_df,
+                x='Channel Pair',
+                y='mean',
+                hue='Condition',
+                palette=palette,
+                errorbar=None,
+                ax=ax
+            )
+        
+        # Enhance the plot
+        ax.set_title(f"{metric} by Channel Pair", fontsize=14, pad=20)
+        ax.set_xlabel("Electrode Pair", fontsize=12, labelpad=10)
+        ax.set_ylabel(f"{metric}", fontsize=12, labelpad=10)
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(True, linestyle='--', alpha=0.7, axis='y')
+        
+        # Make y-axis start at 0
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        
+        # Add value labels on top of bars if there aren't too many bars
+        if len(summary_df) <= 20:  # Only add labels if there aren't too many bars
+            for p in ax.patches:
+                ax.annotate(
+                    f"{p.get_height():.3f}",
+                    (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='bottom',
+                    fontsize=8, color='black',
+                    xytext=(0, 3),
+                    textcoords='offset points'
+                )
+        
+        # Enhance legend
+        ax.legend(
+            title="Condition", 
+            title_fontsize=12,
+            frameon=True, 
+            framealpha=0.9,
+            edgecolor='gray'
+        )
+        
+        # Tight layout to avoid clipping
+        plt.tight_layout()
+        
+        # Save if requested
+        if save_path:
+            # Replace spaces and special characters
+            metric_filename = metric.replace(" ", "_").replace("/", "_")
+            plt.savefig(f"{save_path}_{metric_filename}.png", dpi=300, bbox_inches='tight')
+            print(f"Saved figure to {save_path}_{metric_filename}.png")
+        
+        # Show the plot
+        plt.show()
+    
+    return fig_dict
+
+
+
 
 def plot_connectivity_matrix(matrix, ch_names, title="Connectivity Matrix", cmap="viridis", vmin=None, vmax=None):
     """

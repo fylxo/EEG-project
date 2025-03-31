@@ -622,7 +622,8 @@ def compare_conditions_dfa(epochs_dict, channel, band=None, fit_range=None, orde
 # Configuration
 # ----------------------------------------
 CHANNELS = ['C3', 'Cz', 'C4']
-EXTENDED_CHANNELS = ['C3', 'Cz', 'C4', 'FC3', 'FCz', 'FC4', 'CP3', 'CPz', 'CP4']
+EXTENDED_CHANNELS = ['C3', 'Cz', 'C4', 'FC3', 'FCz', 'FC4', 'CP3', 'CPz', 'CP4', "O1", "O2", "T9", "T10"]
+
 FREQUENCY_BANDS = {
     "alpha": (8, 13),
     "beta": (13, 30)
@@ -981,7 +982,7 @@ def analyze_multiple_subjects(subject_ids=range(1, 11)):
     for band_name, band_range in FREQUENCY_BANDS.items():
         df_band = pd.concat([
             compute_subject_dfa_dataframe(
-                subj, CHANNELS, band=band_range, 
+                subj, EXTENDED_CHANNELS, band=band_range, 
                 envelope_fit_range=ENVELOPE_FIT_RANGE
             ).assign(Band=band_name)
             for subj in subject_ids
@@ -1009,7 +1010,7 @@ def analyze_real_vs_imagined(subject_ids=range(1, 11)):
     # Get data with real vs imagined distinction
     df_all = pd.concat([
         compute_subject_dfa_dataframe(
-            subj, CHANNELS, band=FREQUENCY_BANDS["beta"], 
+            subj, EXTENDED_CHANNELS, band=FREQUENCY_BANDS["beta"], 
             envelope_fit_range=ENVELOPE_FIT_RANGE,
             include_real_vs_imag=True
         )
