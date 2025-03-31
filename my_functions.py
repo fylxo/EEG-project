@@ -8,6 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Scientific computing
 import scipy.stats as stats
@@ -1262,7 +1263,7 @@ def plot_connectivity_difference(matrix1, matrix2, ch_names,
     maxval = max(abs(diff_matrix.min()), abs(diff_matrix.max()))
     
     plt.figure(figsize=(10, 8))
-    im = plt.imshow(diff_matrix, cmap=cmap, vmin=-maxval, vmax=maxval)
+    im = plt.imshow(diff_matrix, cmap=cmap, interpolation="nearest", origin="lower", vmin=-maxval, vmax=maxval)
     plt.colorbar(im, label="Connectivity Difference")
     
     # Add channel labels
@@ -1272,6 +1273,8 @@ def plot_connectivity_difference(matrix1, matrix2, ch_names,
     plt.title(title)
     plt.tight_layout()
     plt.show()
+
+
 
 
 def plot_normalized_connectivity(df, metrics=["iPLV Mean", "wPLI"], figsize=(14, 7)):
