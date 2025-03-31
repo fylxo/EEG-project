@@ -9,8 +9,10 @@ from mne.datasets import eegbci
 from mne.io import read_raw_edf, concatenate_raws
 from mne.channels import make_standard_montage
 from scipy.signal import butter, filtfilt, hilbert
-from scipy.stats import linregress
+from scipy.stats import linregress, ttest_rel
 from tqdm import tqdm
+import pandas as pd
+import seaborn as sns
 
 # -----------------------------------------------------------------------------
 # Data Loading and Preprocessing
@@ -615,3 +617,409 @@ def compare_conditions_dfa(epochs_dict, channel, band=None, fit_range=None, orde
         print(f"{condition.upper()}: α = {alpha:.3f}")
     
     return results
+
+# ----------------------------------------
+# Configuration
+# ----------------------------------------
+CHANNELS = ['C3', 'Cz', 'C4']
+EXTENDED_CHANNELS = ['C3', 'Cz', 'C4', 'FC3', 'FCz', 'FC4', 'CP3', 'CPz', 'CP4']
+FREQUENCY_BANDS = {
+    "alpha": (8, 13),
+    "beta": (13, 30)
+}
+RAW_FIT_RANGE = (50, 5000)
+ENVELOPE_FIT_RANGE = (30, 1000)
+RANDOM_SEED = 42
+
+# ----------------------------------------
+# Data Loading Functions
+# ----------------------------------------
+def load_subject_data(subject_id):
+    """Load data for a single subject with standard run configuration."""
+    runs = {
+        "rest": [1],
+        "motor_execution": [3, 7, 11],
+        "motor_imagery": [4, 8, 12]
+    }
+    
+    # Load and preprocess the data
+    subject_data = load_and_preprocess_subject(subject_id, runs)
+    
+    # Extract epochs from each condition
+    epochs_rest = extract_clean_epochs(subject_data["rest"])
+    epochs_exec = extract_clean_epochs(subject_data["motor_execution"]) 
+    epochs_imag = extract_clean_epochs(subject_data["motor_imagery"])
+    
+    return {
+        "epochs_rest": epochs_rest,
+        "epochs_exec": epochs_exec,
+        "epochs_imag": epochs_imag
+    }
+
+def prepare_epochs(subject_data, include_real_vs_imag=False):
+    """Create combined epoch sets from individual condition epochs."""
+    epochs_rest = subject_data["epochs_rest"]
+    epochs_exec = subject_data["epochs_exec"]
+    epochs_imag = subject_data["epochs_imag"]
+    
+    # Combine epochs for more robust analysis
+    combined_rest = mne.concatenate_epochs([
+        epochs_exec['rest'], 
+        epochs_imag['rest'], 
+        epochs_rest['rest']
+    ])
+    
+    if include_real_vs_imag:
+        # For real vs imagined comparison
+        combined_real = epochs_exec['task']
+        combined_imag = epochs_imag['task']
+        
+        return {
+            "rest": combined_rest,
+            "real": combined_real,
+            "imagined": combined_imag
+        }
+    else:
+        # For rest vs task comparison
+        combined_task = mne.concatenate_epochs([
+            epochs_exec['task'], 
+            epochs_imag['task']
+        ])
+        
+        # Shuffle task epochs for fair sampling
+        np.random.seed(RANDOM_SEED)
+        shuffled_indices = np.random.permutation(len(combined_task))
+        combined_task = combined_task[shuffled_indices]
+        
+        return {
+            "rest": combined_rest,
+            "task": combined_task
+        }
+
+# ----------------------------------------
+# Analysis Functions
+# ----------------------------------------
+def analyze_raw_signal_dfa(epochs_dict, channels, fit_range=RAW_FIT_RANGE):
+    """Analyze DFA on raw signals for multiple conditions."""
+    results = {}
+    
+    for condition, epochs in epochs_dict.items():
+        results[condition] = compute_dfa_from_epochs(
+            epochs, picks=channels, fit_range=fit_range
+        )
+    
+    return results
+
+def analyze_band_dfa(epochs_dict, channels, band, fit_range=ENVELOPE_FIT_RANGE):
+    """Analyze DFA on a specific frequency band for multiple conditions."""
+    results = {}
+    
+    for condition, epochs in epochs_dict.items():
+        results[condition] = compute_dfa_from_epochs(
+            epochs, picks=channels, band=band, fit_range=fit_range
+        )
+    
+    return results
+
+def compute_subject_dfa_dataframe(subject_id, channels, band=None, 
+                                 fit_range=RAW_FIT_RANGE, envelope_fit_range=None,
+                                 include_real_vs_imag=False):
+    """
+    Compute DFA for a single subject and return as a DataFrame.
+    
+    Parameters:
+    -----------
+    subject_id : int
+        Subject number
+    channels : list
+        EEG channels to include
+    band : tuple or None
+        Frequency band for envelope DFA (None for raw signal)
+    fit_range : tuple
+        DFA fit range in samples (raw)
+    envelope_fit_range : tuple
+        DFA fit range for band envelopes
+    include_real_vs_imag : bool
+        If True, split motor execution and imagery separately
+
+    Returns:
+    --------
+    DataFrame with columns: Subject, Channel, Condition, Alpha, [Band]
+    """
+    # Load subject data
+    subject_data = load_subject_data(subject_id)
+    
+    # Prepare epochs based on analysis type
+    epochs_dict = prepare_epochs(subject_data, include_real_vs_imag)
+    
+    # Choose appropriate fit range and analysis function
+    if band is None:
+        dfa_results = analyze_raw_signal_dfa(epochs_dict, channels, fit_range)
+    else:
+        dfa_results = analyze_band_dfa(
+            epochs_dict, channels, band, 
+            fit_range=envelope_fit_range or ENVELOPE_FIT_RANGE
+        )
+    
+    # Convert results to DataFrame
+    rows = []
+    for condition, results in dfa_results.items():
+        for ch in channels:
+            row = {
+                "Subject": subject_id, 
+                "Channel": ch, 
+                "Condition": condition.capitalize(), 
+                "Alpha": results[ch]
+            }
+            if band is not None:
+                row["Band"] = f"{band[0]}-{band[1]}Hz"
+            rows.append(row)
+    
+    return pd.DataFrame(rows)
+
+# ----------------------------------------
+# Visualization Functions
+# ----------------------------------------
+def plot_dfa_comparison_bars(dfa_rest, dfa_task, channels=None, 
+                           title="DFA Comparison (Rest vs Task)", 
+                           figsize=(12, 6), show_diff=True):
+    """
+    Plots a bar chart comparing DFA alpha exponents between conditions.
+    """
+    # Default: use common channels
+    if channels is None:
+        channels = sorted(set(dfa_rest.keys()) & set(dfa_task.keys()))
+
+    # Build dataframe for plotting
+    data = []
+    for ch in channels:
+        rest_alpha = dfa_rest[ch]
+        task_alpha = dfa_task[ch]
+        data.append({"Channel": ch, "Condition": "Rest", "Alpha": rest_alpha})
+        data.append({"Channel": ch, "Condition": "Task", "Alpha": task_alpha})
+
+    df = pd.DataFrame(data)
+
+    # Plot
+    plt.figure(figsize=figsize)
+    ax = sns.barplot(data=df, x="Channel", y="Alpha", hue="Condition", palette="Set2")
+
+    # Optionally show differences
+    if show_diff:
+        for i, ch in enumerate(channels):
+            rest_val = dfa_rest[ch]
+            task_val = dfa_task[ch]
+            diff = task_val - rest_val
+            max_val = max(rest_val, task_val)
+            ax.text(i, max_val + 0.01, f"Δ={diff:+.3f}", ha='center', fontsize=9, color='black')
+
+    # Labels and formatting
+    plt.title(title)
+    plt.ylabel("DFA Scaling Exponent (α)")
+    plt.ylim(min(df["Alpha"]) - 0.05, max(df["Alpha"]) + 0.08)
+    plt.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def plot_group_dfa(df, title="Group DFA Comparison"):
+    """Plot group-level DFA comparisons with error bars."""
+    plt.figure(figsize=(12, 6))
+    sns.barplot(data=df, x="Channel", y="Alpha", hue="Condition", ci="sd", capsize=0.1)
+    plt.title(title)
+    plt.ylabel("DFA α Exponent")
+    plt.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def plot_dfa_grouped_by_band(df, figsize=(14, 6), title="DFA by Channel, Condition & Band"):
+    """Creates a grouped barplot for DFA results across bands and conditions."""
+    plt.figure(figsize=figsize)
+    
+    sns.barplot(
+        data=df,
+        x="Channel", y="Alpha", hue="Condition",
+        palette="Set2", ci="sd", capsize=0.1,
+        dodge=True, errorbar="ci"
+    )
+
+    plt.title(title)
+    plt.ylabel("DFA α Exponent")
+    plt.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def plot_dfa_facet_by_band(df, figsize=(14, 6)):
+    """Faceted seaborn barplot: one subplot per band."""
+    g = sns.catplot(
+        data=df,
+        kind="bar",
+        x="Channel", y="Alpha", hue="Condition", col="Band",
+        palette="Set2", ci="sd", capsize=0.1,
+        height=figsize[1], aspect=figsize[0] / figsize[1]
+    )
+    g.set_titles("{col_name} Band")
+    g.set_axis_labels("Channel", "DFA α Exponent")
+    for ax in g.axes.flat:
+        ax.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+# ----------------------------------------
+# Statistical Analysis
+# ----------------------------------------
+def paired_ttest_dfa(df):
+    """Perform paired t-tests between conditions for each channel."""
+    channels = df["Channel"].unique()
+    results = []
+
+    for ch in channels:
+        df_ch = df[df["Channel"] == ch]
+        df_pivot = df_ch.pivot(index="Subject", columns="Condition", values="Alpha").dropna()
+        
+        # Get column names that should represent different conditions
+        conditions = df_pivot.columns
+        if len(conditions) >= 2:
+            t_stat, p_val = ttest_rel(df_pivot[conditions[0]], df_pivot[conditions[1]])
+            results.append({
+                "Channel": ch, 
+                "t": t_stat, 
+                "p": p_val, 
+                "Comparison": f"{conditions[0]} vs {conditions[1]}"
+            })
+    
+    return pd.DataFrame(results)
+
+# ----------------------------------------
+# Main Analysis Functions
+# ----------------------------------------
+def analyze_single_subject(subject_id=1):
+    """Complete analysis pipeline for a single subject."""
+    # Load and prepare data
+    subject_data = load_subject_data(subject_id)
+    epochs_dict = prepare_epochs(subject_data)
+    
+    print(f"Combined REST epochs: {len(epochs_dict['rest'])}")
+    print(f"Combined TASK epochs: {len(epochs_dict['task'])}")
+    
+    # Analyze raw signal DFA
+    dfa_results = analyze_raw_signal_dfa(epochs_dict, CHANNELS)
+    
+    # Print results
+    print("\nRaw Signal DFA Results:")
+    print("-" * 30)
+    print("Channel | Rest Alpha | Task Alpha")
+    print("-" * 30)
+    for ch in CHANNELS:
+        print(f"{ch:7} | {dfa_results['rest'][ch]:.3f} | {dfa_results['task'][ch]:.3f}")
+    
+    # Visual comparison
+    compare_conditions_dfa(
+        {'Rest': epochs_dict['rest'], 'Task': epochs_dict['task']}, 
+        channel='Cz', 
+        fit_range=RAW_FIT_RANGE
+    )
+    
+    # Plot comparison
+    plot_dfa_comparison_bars(dfa_results['rest'], dfa_results['task'], channels=CHANNELS)
+    
+    # Analyze frequency bands
+    for band_name, freq_range in FREQUENCY_BANDS.items():
+        print(f"\n{band_name.upper()} BAND ({freq_range[0]}-{freq_range[1]} Hz)")
+        print("-" * 50)
+        
+        # Compare conditions
+        results = compare_conditions_dfa(
+            {'Rest': epochs_dict['rest'], 'Task': epochs_dict['task']},
+            channel='Cz',
+            band=freq_range,
+            fit_range=ENVELOPE_FIT_RANGE
+        )
+    
+    # Extended beta band analysis across multiple channels
+    beta_band = FREQUENCY_BANDS["beta"]
+    beta_results = analyze_band_dfa(
+        epochs_dict, EXTENDED_CHANNELS, beta_band, ENVELOPE_FIT_RANGE
+    )
+    
+    # Print beta results
+    print("\nBeta Band DFA Results:")
+    print("-" * 40)
+    print("Channel | Rest Alpha | Task Alpha | Difference")
+    print("-" * 40)
+    for ch in EXTENDED_CHANNELS:
+        diff = beta_results['task'][ch] - beta_results['rest'][ch]
+        print(f"{ch:7} | {beta_results['rest'][ch]:.3f} | {beta_results['task'][ch]:.3f} | {diff:+.3f}")
+    
+    # Return all results for potential further analysis
+    return {
+        "raw_dfa": dfa_results,
+        "beta_dfa": beta_results,
+        "epochs": epochs_dict
+    }
+
+def analyze_multiple_subjects(subject_ids=range(1, 11)):
+    """Analyze DFA across multiple subjects and return combined DataFrame."""
+    # Beta band analysis across subjects
+    df_all_dfa = pd.concat([
+        compute_subject_dfa_dataframe(
+            subj, CHANNELS, band=FREQUENCY_BANDS["beta"], 
+            envelope_fit_range=ENVELOPE_FIT_RANGE
+        )
+        for subj in subject_ids
+    ], ignore_index=True)
+    
+    # Plot group results
+    plot_group_dfa(df_all_dfa, title="Group DFA Comparison (Beta Band)")
+    
+    # Perform statistical testing
+    stats_results = paired_ttest_dfa(df_all_dfa)
+    print("\nStatistical Results:")
+    print(stats_results)
+    
+    # Compare across frequency bands
+    df_all_bands = []
+    for band_name, band_range in FREQUENCY_BANDS.items():
+        df_band = pd.concat([
+            compute_subject_dfa_dataframe(
+                subj, CHANNELS, band=band_range, 
+                envelope_fit_range=ENVELOPE_FIT_RANGE
+            ).assign(Band=band_name)
+            for subj in subject_ids
+        ])
+        df_all_bands.append(df_band)
+
+    df_all_bands = pd.concat(df_all_bands, ignore_index=True)
+    
+    # Plot comparisons across bands
+    plot_dfa_facet_by_band(df_all_bands)
+    
+    # Analyze individual bands
+    for band in df_all_bands["Band"].unique():
+        df_band = df_all_bands[df_all_bands["Band"] == band]
+        plot_dfa_grouped_by_band(df_band, title=f"{band.capitalize()} Band DFA Comparison")
+    
+    return {
+        "df_beta": df_all_dfa,
+        "df_all_bands": df_all_bands,
+        "stats": stats_results
+    }
+
+def analyze_real_vs_imagined(subject_ids=range(1, 11)):
+    """Compare DFA between real and imagined motor movements."""
+    # Get data with real vs imagined distinction
+    df_all = pd.concat([
+        compute_subject_dfa_dataframe(
+            subj, CHANNELS, band=FREQUENCY_BANDS["beta"], 
+            envelope_fit_range=ENVELOPE_FIT_RANGE,
+            include_real_vs_imag=True
+        )
+        for subj in subject_ids
+    ], ignore_index=True)
+    
+    # Filter to only include real and imagined (exclude rest)
+    df_real_vs_imag = df_all[df_all["Condition"].isin(["Real", "Imagined"])]
+    
+    # Plot comparison
+    plot_dfa_grouped_by_band(df_real_vs_imag, title="DFA: Real vs Imagined")
+    
+    return df_real_vs_imag
