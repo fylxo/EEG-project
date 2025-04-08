@@ -1,0 +1,86 @@
+# EEG Analysis of Motor Execution vs. Imagery: Neural Patterns and Dynamics
+
+## Introduction
+
+I used this opportunity to explore something that interests me, brain-computer interfaces and the neural similarity between real and imagined movement. It's always fascinating to see how the brain treats these two conditions in remarkably similar ways.
+
+Doing this project got me a little bit depressed, because I don't have any great result and I'm not sure that even the analysis that I did are correct. Working with EEG data is challenging. The signals are inherently noisy, and when using public datasets, you must trust the recording methods. The EEG signal is so fragile that the preprocessing decisions become critical — use ICA and risk removing actual neural signals, or use minimal filtering and risk keeping artifacts? When dealing with large datasets (in this case 104 subjects across 14 runs), manually reviewing all ICA components becomes impractical. This leads many researchers to rely on simple bandpass filtering before feeding data into classifiers that achieve impressive accuracies — though I suspect some of these results stem from overfitting and not generalizes so well in real-world scenarios.
+
+While if you want to try to answer more deeper theoretical questions about motor imagery probably you need to tackle the problem by using multiple techniques like MEG, for the temporal resolution and functional connectivity, or finding the neural mechanisms for real and imaginary movement in order to being able to compare them. But now it's too late and this project it's not intended for winning the Nobel Prize. 
+
+But still I've tried to address the question of How similar are the neural patterns of real movement and imagined movement (using resting state as baseline)?
+
+
+In this type of Neuroscience there is the problem that it's not a mathematical demonstration, and you can get a result even if you did some error in the code, the code still execute, and then you "interpret" your data, and obviously you interpret it by cherry picking your hypothesis, and even if the results confirm your hypothesis you still don't completely believe in them.
+
+For this reason, I don't trust my result.
+
+-------------------------------------------------------------------------------------------
+
+
+## Methods & Analysis Pipeline
+
+I worked with the PhysioNet motor imagery dataset, which offers a substantial number of subjects performing both real and imagined movements. My analysis pipeline involved:
+
+1. **Preprocessing**: I implemented three approaches (manual, semi-manual, and automatic), ultimately using the automatic approach with bandpass filtering (6-30 Hz) for computational efficiency (And in every analysis I always got very similar results). This frequency range naturally filters out many common artifacts while retaining the motor-relevant oscillations. I used the automatic way even for making my life easier. 
+
+After that you need to separate all the conditions from each epochs, and the way that were implemented (T0, T1, T2) is not so easy, and then you have to decide to apply an ICA can change a lot: you can apply ICA for the individual runs, or apply for all the ICA runs concatenated,  or the condition concatenated for multiple subjects (such as all the rest condition). Unfortunately 
+the last two ways you have to lose the annotations and so you can't distinguish anymore between them, so it was better to apply ICA for individual runs and then put them in the right places in the dictionary. The concatenation of Annotations within Epochs is not supported so all annotations will be dropped *with mne.concatenate_epochs)
+
+After you have done that, you can apply the ERD/ERS plot where you can see compared to the baseline, how the activity in the motor areas increases during the "go" signal, and that's at least is a good sanity check. And I think that some machine learning algorithm use this kind of data for training the neural network.
+
+
+2. **Condition Separation**: I extracted epochs for different conditions (real movement, imagined movement, rest) based on the event markers (T0, T1, T2).
+
+3. **ERD/ERS Analysis**: I calculated event-related desynchronization/synchronization patterns relative to baseline, providing a visual sanity check of motor activity during movement and imagery.
+
+4. **Connectivity Metrics**: I computed multiple connectivity measures:
+   - Phase Locking Value (PLV): Measures consistency of phase relationships between signals
+   - Imaginary PLV (iPLV): Reduces volume conduction effects
+   - Weighted Phase Lag Index (wPLI): Robust against common reference influences
+   - Coherence: Classic measure of spectral similarity
+
+I calculated the time frequency representation and it's not clear at all for me, so I will not display it (Same for Coherence).
+
+5. **Classification Analysis**: I implemented CSP+LDA classification to quantitatively assess distinguishability between conditions, using subject-aware cross-validation, and examining both frequency bands and time windows.
+
+6. **Frequency Band Analysis**: I compared classification performance across different frequency bands to identify which oscillations best differentiate the conditions.
+
+7. **Time Window Analysis**: I examined how classification performance varies across the time course of movement execution and imagery.
+
+8. **Criticality Analysis**: I applied Detrended Fluctuation Analysis (DFA) to assess the scale-free dynamics of brain activity across conditions, examining both raw signals and frequency-specific envelopes.
+
+## Comprehensive Interpretation
+
+Taken together, my analysis supports the hypothesis that "real and imagined movements show very similar brain patterns, while both differ from rest." The evidence is converging across multiple analytical approaches:
+
+1. The connectivity metrics (iPLV/wPLI) demonstrate that functional networks reorganize similarly during both real and imagined movement, with both conditions significantly different from rest
+
+2. Classification algorithms struggle to distinguish real from imagined movement while easily separating either from rest, quantitatively confirming their neural similarity
+
+3. The DFA exponents show nearly identical dynamical properties between real and imagined conditions, suggesting similar underlying neural processing mechanisms
+
+4. The time course analysis reveals similar temporal evolution of neural patterns in both movement conditions
+
+This type of findings have important implications for BCI development, as they confirm that imagery can serve as an effective proxy for actual movement in neural decoding applications. The similarity in dynamical properties also suggests that the brain engages similar computational principles when executing and merely imagining movement.
+
+## Limitations and Reflections
+
+Working with EEG data presents inherent challenges. Despite my best efforts, several limitations should be acknowledged:
+
+- The spatial resolution of EEG limits our ability to identify precise neural sources
+- Volume conduction effects can never be completely eliminated, even with advanced metrics
+- The preprocessing decisions inevitably involve tradeoffs between artifact removal and signal preservation
+- Individual variability in motor imagery ability likely influences some of the observed patterns
+
+## Conclusion
+
+My analysis demonstrates that real and imagined movements engage remarkably similar neural circuits and dynamics. The most compelling evidence comes from:
+
+1. The connectivity metrics showing statistically indistinguishable patterns between real and imagined movement
+2. The classification algorithms struggling to differentiate between these conditions
+3. The identical criticality levels observed in both movement types
+
+These findings align with current neuroscientific understanding that motor imagery engages much of the same neural circuitry as actual execution.
+
+This work reinforces the fascinating reality that, for our brains, imagining an action creates neural patterns strikingly similar to actually performing it.
