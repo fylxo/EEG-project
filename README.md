@@ -26,17 +26,6 @@ The goal is to evaluate the *functional equivalence hypothesis*, which proposes 
 - **Classification**: Common Spatial Patterns + Linear Discriminant Analysis to distinguish between conditions  
 - **DFA**: Used to analyze scale-free dynamics and criticality of EEG signals in different frequency bands  
 
----
-
-## 📁 Repository Structure
-├── experiment1.ipynb # Analysis: Connectivity, Classification, ERD/ERS
-├── experiment2.ipynb # DFA analysis & comparisons across conditions
-├── my_functions.py # Core EEG preprocessing & connectivity functions
-├── my_functions2.py # DFA and envelope-based signal analysis
-├── Report-Flavio_Caroli.pdf # Full write-up of the project and results
-└── README.md # This file
-
-
 
 ---
 
